@@ -1,0 +1,29 @@
+#!/bin/bash
+
+source ~/.bashrc
+
+
+#### Title: run all samples at the same time
+
+
+dir={"all sample direction"}
+
+
+cd $dir
+
+
+all_sampleid=$(cat Allsampleid.txt)
+
+
+for sampleid in $all_sampleid
+
+do
+
+cd $sampleid
+
+sbatch -J=${sampleid}_STAR_count.run -o ${sampleid}_STAR_count.out -e ${sampleid}_STAR_count.err $dir/RNAseq_analysis_pipeline_using_Fastp_STAR_featureCounts_RSEM.sh $sampleid
+
+cd ..
+
+done
+

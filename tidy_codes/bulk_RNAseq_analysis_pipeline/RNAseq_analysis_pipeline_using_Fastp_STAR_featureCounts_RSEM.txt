@@ -1,0 +1,163 @@
+#!/bin/bash
+
+#SBATCH -o job.out
+
+#SBATCH -e job.err
+
+#SBATCH -p amd-ep2,intel-sc3,amd-ep2-short
+
+#SBATCH --qos=huge
+
+#SBATCH -J job
+
+#SBATCH -c 8
+
+#SBATCH --nodes=1
+
+#SBATCH --mem 60G
+
+
+# step 1. module load software --------------------------------------------
+
+# module load bwa/0.7.17
+# 
+# module load samtools/1.14
+# 
+# module load gatk/4.2.0.0
+
+####
+
+source ~/.bashrc
+
+####
+
+#### Title: Bioinformatics_Pipelines/Expression_mRNA_Pipeline
+
+#### reference: https://docs.gdc.cancer.gov/Data/Bioinformatics_Pipelines/Expression_mRNA_Pipeline/
+
+
+# sample name -------------------------------------------------------------
+
+sampleid=$1
+
+
+fastq1=${sampleid}*R1_001.fastq.gz
+fastq2=${sampleid}*R2_001.fastq.gz
+
+
+#### step 1. use the fastp to do the quality control
+# fastp: https://github.com/OpenGene/fastp 
+
+
+$fastp -i $fastq1 -I $fastq2 -o ${sampleid}.R1.QC.fastq.gz -O ${sampleid}.R2.QC.fastq.gz && echo "** fastp QC done **"
+
+
+#### step 2. use the STAR to align reads into the reference genome  ---------------------------------------------------------
+# STAR: https://github.com/alexdobin/STAR 
+
+
+fastq_qc_1=${sampleid}.R1.QC.fastq.gz
+fastq_qc_2=${sampleid}.R2.QC.fastq.gz
+
+
+STAR_index=/storage/XXXLab/WGS_data/chm13_STAR_index
+
+
+$STAR \
+--readFilesIn $fastq_qc_1 $fastq_qc_2 \
+--outSAMattrRGline ID:${sampleid} LB:library PL:ILLUMINA PU:machine SM:${sampleid} \
+--genomeDir $STAR_index \
+--readFilesCommand zcat \
+--outFileNamePrefix ${sampleid}_ \
+--runThreadN 8 \
+--twopassMode Basic \
+--outFilterMultimapNmax 10 \
+--winAnchorMultimapNmax 10 \
+--outSAMmultNmax -1 \
+--alignSJoverhangMin 8 \
+--alignSJDBoverhangMin 1 \
+--outFilterMismatchNmax 999 \
+--outFilterMismatchNoverLmax 0.1 \
+--alignIntronMin 20 \
+--alignIntronMax 1000000 \
+--alignMatesGapMax 1000000 \
+--outFilterType BySJout \
+--outFilterScoreMinOverLread 0.33 \
+--outFilterMatchNminOverLread 0.33 \
+--limitSjdbInsertNsj 1200000 \
+--outSAMstrandField intronMotif \
+--outFilterIntronMotifs None \
+--alignSoftClipAtReferenceEnds Yes \
+--quantMode TranscriptomeSAM GeneCounts \
+--outSAMtype BAM Unsorted \
+--outSAMunmapped Within \
+--genomeLoad NoSharedMemory \
+--outSAMattributes NH HI AS nM NM ch \
+&& echo "** STAR done **"
+
+# --chimSegmentMin 15 \
+# --chimJunctionOverhangMin 15 \
+# --chimOutType Junctions SeparateSAMold WithinBAM SoftClip \
+# --chimOutJunctionFormat 1 \
+# --chimMainSegmentMultNmax 1 \
+
+
+
+#### step 3. sort the *Aligned.out.bam file from the STAR output
+
+bamfile=$(ls *Aligned.out.bam)
+
+samtools sort -@ 8 -m 2G $bamfile -o ${sampleid}.sorted.chm13.bam && echo "** BAM sort done **"
+samtools index ${sampleid}.sorted.chm13.bam && echo "** BAM index done **"
+
+
+#### step 4. use the featureCounts to count all gene reads
+# featureCounts: https://subread.sourceforge.net/
+
+
+# Multi-mapping reads
+# -M  Multi-mapping reads will also be counted. For a multi-
+# mapping read, all its reported alignments will be
+# counted. The 'NH' tag in BAM/SAM input is used to detect
+# multi-mapping reads.
+
+#### https://www.biostars.org/p/382850/
+
+
+gtf=/storage/XXXLab/WGS_data/chm13_human_annotation/CHM13.v2.0.gtf
+
+$featureCounts -T 8 \
+-M \
+-p --countReadPairs \
+-t exon \
+-g gene_id \
+-a $gtf \
+-o ${sampleid}.counts.txt \
+--largestOverlap \
+${sampleid}.sorted.chm13.bam && echo "** featureCounts done **"
+
+
+#### step 5. also use the RSEM to count all gene reads------------------------------------------------------------
+# RSEM: https://github.com/deweylab/RSEM
+
+
+bamfile1=$(ls *Aligned.toTranscriptome.out.bam)
+
+ref=/storage/XXXLab/WGS_data/RSEM_references/chm13
+
+RSEM_dir=/storage/XXXLab/software/RSEM-1.3.3
+
+
+
+${RSEM_dir}/rsem-calculate-expression \
+--alignments \
+--paired-end \
+-p 8 \
+--strandedness none \
+${bamfile1} \
+${ref} \
+${sampleid} && echo "** RSEM done **"
+
+
+#### step 6. extract the count and TPM value
+

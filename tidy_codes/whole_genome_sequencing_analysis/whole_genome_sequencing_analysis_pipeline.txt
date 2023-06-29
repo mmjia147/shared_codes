@@ -1,0 +1,162 @@
+#!/bin/bash
+
+#SBATCH -o job.out
+
+#SBATCH -e job.err
+
+#SBATCH -p amd-ep2,intel-sc3
+
+#SBATCH --qos=huge
+
+#SBATCH -J job
+
+#SBATCH -c 4
+
+#SBATCH --nodes=1
+
+#SBATCH --mem 100G
+
+
+
+# module load anaconda3
+
+module load bwa/0.7.17
+
+module load samtools/1.14
+
+module load gatk/4.2.0.0
+
+# module load picard/2.25.1
+
+####
+
+source ~/.bashrc
+
+
+#### Title: whole genome sequencing analysis pipeline;
+# reference: https://docs.gdc.cancer.gov/Data/Bioinformatics_Pipelines/DNA_Seq_Variant_Calling_Pipeline/
+# GATK: https://gatk.broadinstitute.org/hc/en-us/categories/360002302312
+# Best Practices Workflows: https://gatk.broadinstitute.org/hc/en-us/sections/360007226651-Best-Practices-Workflows
+
+
+#### code need to change: ----------------------------------------------------
+
+# 1. file_dir; 2. -mem, -c
+
+
+
+#### step 1. file direction and sample name;
+
+file_dir=/storage/XXXLab/GDC_UCEC/GDC_UCEC_s333_all_WGS
+
+sampleid=$1
+
+filename=$(ls *.bam)
+
+
+#### step 2. Since we downloaded the original data from TCGA, we need to convert the bam into the fastq first.
+
+
+# sort paired read alignment .bam file (sort by name -n)
+
+samtools sort -@ 8 -m 8G -n $filename -o ${sampleid}.sorted.bam && echo "** BAM sort done **"
+
+
+# save fastq reads in separate R1 and R2 files
+
+samtools fastq -@ 8 ${sampleid}.sorted.bam \
+-1 ${sampleid}_R1.fastq.gz \
+-2 ${sampleid}_R2.fastq.gz \
+-0 /dev/null -s /dev/null -n && echo "** bam to fastq done **"
+
+
+
+#### step 3. use the fastp to do the quality control
+# fastp: https://github.com/OpenGene/fastp 
+
+$fastp -i ${sampleid}_R1.fastq.gz -I ${sampleid}_R2.fastq.gz -o ${sampleid}.R1.QC.fastq.gz -O ${sampleid}.R2.QC.fastq.gz && echo "** fastp QC done **"
+
+
+fastq1=${file_dir}/${sampleid}/${sampleid}.R1.QC.fastq.gz
+fastq2=${file_dir}/${sampleid}/${sampleid}.R2.QC.fastq.gz
+
+
+#### step 4. use the BWA to align reads into the reference genome
+# BWA ALIGNMENT
+
+
+header=$(zcat $fastq1 | head -n 1)
+id=$(echo $header | head -n 1 | cut -f 1-4 -d":" | sed 's/@//' | sed 's/:/_/g')
+
+read_group="@RG\tID:${id}\tPL:ILLUMINA\tLB:library\tSM:${sampleid}"
+
+ref_fasta=/storage/XXXLab/WGS_data/chm13_human_reference/chm13v2.0.fasta
+
+output_bam=${sampleid}.sorted.chm13.bam
+
+#########
+
+bwa mem -t 8 -R ${read_group} $ref_fasta \
+$fastq1 $fastq2 | samtools sort -@ 8 -m 8G -O bam -o $output_bam - && echo "** BAM align and samtools sort done"
+
+samtools index $output_bam && echo "** $output_bam index done **"
+
+
+#### step 5. since we are only interested in rDNA mutations, we extract rDNA regions from the bam.
+
+# extract bed region
+
+samtools view -b -h -L ${file_dir}/rDNA.bed $output_bam > ${sampleid}.rRNA.sorted.chm13.bam && echo "** samtools view dup done **"
+
+samtools index ${sampleid}.rRNA.sorted.chm13.bam && echo "** ${sampleid}.rRNA.sorted.chm13.bam index done **"
+
+
+
+#### step 6. Follow the GATK tutorial.........MARK DUPLICATES
+# 
+
+input_bam2=${sampleid}.rRNA.sorted.chm13.bam
+
+output_bam2=${sampleid}.markdup.rRNA.sorted.chm13.bam
+
+# gatk MarkDuplicates
+time gatk MarkDuplicates -I $input_bam2 -O $output_bam2 -M ${sampleid}.markdup.rRNA.sorted.chm13.metrics.txt -VALIDATION_STRINGENCY LENIENT && echo "** markdup done **"
+
+# create index
+time samtools index $output_bam2 && echo "** index done **"
+
+
+#### step 7. BASE QUALITY SCORE RECALIBRATION
+
+known_site=/storage/XXXLab/WGS_data/chm13_human_reference
+ref_fasta=/storage/XXXLab/WGS_data/chm13_human_reference/chm13v2.0.fasta
+
+# gatk BaseRecalibrator
+gatk BaseRecalibrator \
+-I $output_bam2 \
+-R $ref_fasta \
+-O ${sampleid}.markdup.rRNA.sorted.chm13.bqsr.report \
+--known-sites $known_site/chm13v2.0_dbSNPv155.vcf.gz \
+--known-sites $known_site/Homo_sapiens_assembly38.known_indels.chm13.vcf.gz \
+--known-sites $known_site/Mills_and_1000G_gold_standard.indels.chm13.vcf.gz && echo "** BaseRecalibrator done **"
+
+
+#### step 8. ApplyBQSR
+
+gatk ApplyBQSR \
+-I $output_bam2 \
+-R $ref_fasta \
+--bqsr-recal-file ${sampleid}.markdup.rRNA.sorted.chm13.bqsr.report \
+-O ${sampleid}.markdup.rRNA.sorted.chm13.bqsr.bam && echo "** ApplyBQSR done **"
+
+
+#### step 9. HaplotypeCaller ---------------------------------------------------------
+
+gatk HaplotypeCaller \
+--minimum-mapping-quality 0 \
+--mapping-quality-threshold-for-genotyping 0 \
+-R $ref_fasta \
+-I ${sampleid}.markdup.rRNA.sorted.chm13.bqsr.bam \
+-O ${sampleid}.rRNA.MAPQ0.g.vcf.gz \
+-ERC GVCF && echo "** HaplotypeCaller done **"
+

@@ -1,0 +1,32 @@
+#!/bin/bash
+
+source ~/.bashrc
+
+# code need to change: ----------------------------------------------------
+
+# 1. dir; 2. sampleid.txt; 3. whole_genome_sequencing_analysis_pipeline.sh
+
+
+#### Title: run all samples at the same time
+
+# -------------------------------------------------------------------------
+
+dir={"all sample direction"}
+
+cd $dir
+
+
+all_sampleid=$(cat sampleid.txt)
+
+
+for sampleid in $all_sampleid
+
+do
+
+cd $sampleid
+
+sbatch -J=${sampleid}_fastq_gvcf.run -o ${sampleid}_fastq_gvcf.out -e ${sampleid}_fastq_gvcf.err $dir/whole_genome_sequencing_analysis_pipeline.sh $sampleid
+
+cd ..
+
+done
